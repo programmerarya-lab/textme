@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Encrypted Messenger</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-900 text-gray-100 flex flex-col items-center justify-center min-h-screen p-6">
+
+    <h1 class="text-2xl font-bold mb-6">🔐 Encrypted Messenger</h1>
+
+    <!-- Sender -->
+    <div class="w-full max-w-lg bg-gray-800 p-4 rounded-xl shadow mb-8">
+        <h2 class="text-lg font-semibold mb-2">Send Encrypted Message</h2>
+        <textarea id="plainIn" placeholder="Type your secret..." class="w-full p-2 mb-2 rounded bg-gray-700"></textarea>
+        <input type="password" id="pass" placeholder="Passphrase" class="w-full p-2 mb-2 rounded bg-gray-700" />
+        <button id="encBtn" class="w-full bg-blue-600 hover:bg-blue-500 p-2 rounded">Encrypt & Send</button>
+        <div id="encErr" class="text-red-400 text-sm mt-2"></div>
+        <textarea id="cipherOut" readonly class="w-full p-2 mt-2 rounded bg-gray-700"></textarea>
+    </div>
+
+    <!-- Receiver -->
+    <div class="w-full max-w-lg bg-gray-800 p-4 rounded-xl shadow">
+        <h2 class="text-lg font-semibold mb-2">Decrypt Received Message</h2>
+        <textarea id="cipherIn" placeholder="Paste ciphertext from Discord..."
+            class="w-full p-2 mb-2 rounded bg-gray-700"></textarea>
+        <input type="password" id="passIn" placeholder="Passphrase" class="w-full p-2 mb-2 rounded bg-gray-700" />
+        <button id="decBtn" class="w-full bg-green-600 hover:bg-green-500 p-2 rounded">Decrypt</button>
+        <div id="decErr" class="text-red-400 text-sm mt-2"></div>
+        <div id="plainOut" class="w-full p-2 mt-2 rounded bg-gray-700 hidden"></div>
+    </div>
+
+    <script>
+        // --- Encryption helpers ---
+        async function getKeyMaterial(passphrase) {
+            let enc = new TextEncoder();
+            return await crypto.subtle.importKey(
+                "raw", enc.encode(passphrase), { name: "PBKDF2" }, false, ["deriveBits", "deriveKey"]);
+        }
+        async function getKey(keyMaterial, salt) {
+            return await crypto.subtle.deriveKey(
+                { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
+                keyMaterial, { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+        }
+        async function encryptMessage(message, passphrase) {
+            const enc = new TextEncoder();
+            const salt = crypto.getRandomValues(new Uint8Array(16));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const keyMaterial = await getKeyMaterial(passphrase);
+            const key = await getKey(keyMaterial, salt);
+            const cipherBuffer = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(message));
+            return {
+                cipher: btoa(String.fromCharCode(...new Uint8Array(cipherBuffer))),
+                iv: btoa(String.fromCharCode(...iv)),
+                salt: btoa(String.fromCharCode(...salt))
+            };
+        }
+        async function decryptMessage(payload, passphrase) {
+            const dec = new TextDecoder();
+            const iv = Uint8Array.from(atob(payload.iv), c => c.charCodeAt(0));
+            const salt = Uint8Array.from(atob(payload.salt), c => c.charCodeAt(0));
+            const data = Uint8Array.from(atob(payload.cipher), c => c.charCodeAt(0));
+            const keyMaterial = await getKeyMaterial(passphrase);
+            const key = await getKey(keyMaterial, salt);
+            const plainBuffer = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+            return dec.decode(plainBuffer);
+        }
+
+        // --- Encrypt & Send ---
+        document.getElementById("encBtn").onclick = async () => {
+            const plain = document.getElementById("plainIn").value.trim();
+            const pass = document.getElementById("pass").value;
+            const errEl = document.getElementById("encErr");
+            const outEl = document.getElementById("cipherOut");
+            errEl.textContent = "";
+            outEl.value = "";
+            try {
+                if (!plain) throw new Error("Enter a message");
+                if (!pass) throw new Error("Enter a passphrase");
+                const payload = await encryptMessage(plain, pass);
+                const blob = btoa(JSON.stringify(payload));
+                const fenced = "```e2ee\n" + blob + "\n```";
+                outEl.value = fenced;
+
+                // 🚀 Send to Discord webhook
+                const webhook = "https://discord.com/api/webhooks/1406257994512994324/wL74qUvx4jXzAFv1UIMqnVpaPEJN9nO0XkQYbOsI6-KWQo6yOF8Bzv2w-Cw5YESf6WPM"; // paste your webhook here
+                fetch(webhook, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content: fenced })
+                });
+            } catch (e) {
+                errEl.textContent = e.message;
+            }
+        };
+
+        // --- Decrypt (with auto-disappear) ---
+        document.getElementById("decBtn").onclick = async () => {
+            const cipherIn = document.getElementById("cipherIn").value.trim();
+            const passIn = document.getElementById("passIn").value;
+            const outEl = document.getElementById("plainOut");
+            const errEl = document.getElementById("decErr");
+            outEl.classList.add("hidden");
+            errEl.textContent = "";
+            try {
+                if (!cipherIn) throw new Error("Paste ciphertext");
+                if (!passIn) throw new Error("Enter passphrase");
+                let blob = cipherIn;
+                const fenced = blob.match(/```(?:e2ee)?\n([\s\S]*?)\n```/i);
+                if (fenced) blob = fenced[1].trim();
+                const payload = JSON.parse(atob(blob));
+                const text = await decryptMessage(payload, passIn);
+
+                outEl.textContent = text;
+                outEl.classList.remove("hidden");
+
+                // ⏳ Auto-disappear after 5s
+                setTimeout(() => {
+                    outEl.textContent = "";
+                    outEl.classList.add("hidden");
+                }, 5000);
+
+                // 👆 Also vanish on outside click
+                document.addEventListener("click", function clearOnce(e) {
+                    if (!outEl.contains(e.target)) {
+                        outEl.textContent = "";
+                        outEl.classList.add("hidden");
+                        document.removeEventListener("click", clearOnce);
+                    }
+                });
+            } catch (e) {
+                errEl.textContent = e.message;
+            }
+        };
+    </script>
+</body>
+
+</html>
